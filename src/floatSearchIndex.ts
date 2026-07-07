@@ -33,6 +33,7 @@ import {
 	WorkspaceLeaf,
 } from "obsidian";
 import { EmbeddedView, isEmebeddedLeaf, spawnLeafView } from "./leafView";
+import { SearchFilter, parseFilter } from "./searchFilter";
 import { around } from "monkey-around";
 import { debounce } from "obsidian";
 import { t } from "./i18n";
@@ -151,9 +152,13 @@ const initSearchViewWithLeaf = async (
 			...state,
 			query: activePlugin
 				? activePlugin.withExclusion(
-						(state?.query as string) ?? ""
+						new SearchFilter(app).toNativeQuery(
+							(state?.query as string) ?? ""
+						)
 				  )
-				: (state?.query as string) ?? "",
+				: new SearchFilter(app).toNativeQuery(
+						(state?.query as string) ?? ""
+				  ),
 			triggerBySelf: true,
 		},
 	});
@@ -386,7 +391,8 @@ export default class FloatSearchPlugin extends Plugin {
 	// Exclusion rules are applied automatically by the target search view.
 	openSearchWithQuery(query: string) {
 		const viewType = this.settings.defaultViewType;
-		const state = { ...this.state, query, current: true };
+		const nativeQuery = new SearchFilter(this.app).toNativeQuery(query);
+		const state = { ...this.state, query: nativeQuery, current: true };
 		if (viewType === "modal") {
 			this.initModal(state, true, false);
 		} else {
@@ -2364,50 +2370,6 @@ interface CmdkResult {
 	savedQuery?: string;
 }
 
-function fileMatchesFilter(
-	app: App,
-	file: TFile,
-	filter: string
-): boolean {
-	const trimmed = filter.trim();
-	if (!trimmed) return true;
-
-	// tag:xxx or #xxx
-	const tagMatch =
-		trimmed.match(/^tag:(.+)$/) || trimmed.match(/^#(.+)$/);
-	if (tagMatch) {
-		const tag = tagMatch[1].trim();
-		const cache = app.metadataCache.getFileCache(file);
-		if (cache?.tags) {
-			return cache.tags.some(
-				(t) => t.tag === tag || t.tag === "#" + tag
-			);
-		}
-		return false;
-	}
-
-	// path:xxx
-	const pathMatch = trimmed.match(/^path:(.+)$/);
-	if (pathMatch) {
-		const path = pathMatch[1].trim().toLowerCase();
-		return file.path.toLowerCase().includes(path);
-	}
-
-	// file:xxx or name:xxx
-	const nameMatch = trimmed.match(/^(?:file|name):(.+)$/);
-	if (nameMatch) {
-		const name = nameMatch[1].trim().toLowerCase();
-		return (
-			file.name.toLowerCase().includes(name) ||
-			file.basename.toLowerCase() === name
-		);
-	}
-
-	// Default: fuzzy match on path
-	const fuzzy = prepareFuzzySearch(trimmed);
-	return fuzzy(file.path) != null;
-}
-
 class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 	plugin: FloatSearchPlugin;
 	private bodyEl: HTMLElement;
@@ -2418,12 +2380,17 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 	private contentCache = new Map<string, { mtime: number; text: string }>();
 	private debouncedUpdate = debounce(() => this.runSearch(), 150);
 	private activeFilters: string[] = [];
+	private filterMatchSets: Map<string, Set<string>> | null = null;
+	private searchFilter: SearchFilter;
+	private liveQuery = "";
+	private liveHasFilter = false;
 	private filterBarEl: HTMLElement;
 
 	constructor(plugin: FloatSearchPlugin, initialFilters?: string[]) {
 		super(plugin.app);
 		this.plugin = plugin;
 		this.limit = 50;
+		this.searchFilter = new SearchFilter(this.app);
 		this.activeFilters = initialFilters ? [...initialFilters] : [];
 		this.setPlaceholder("Search files and content...");
 		this.setInstructions([
@@ -2504,7 +2471,18 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
   private matchesFilters(file: TFile): boolean {
     if (this.activeFilters.length === 0) return true;
     return this.activeFilters.every((f) =>
-      fileMatchesFilter(this.app, file, f)
+      this.filterMatchSets?.get(f)?.has(file.path) ?? false
+    );
+  }
+
+  // Precompute, for each active filter query, the set of file paths that
+  // match. Delegates to SearchFilter, the single source of truth for all
+  // filter matching (tag / path / folder / property / text, with AND across
+  // clauses and nested-tag support matching native search).
+  private prepareFilterMatchSets(files: TFile[]) {
+    this.filterMatchSets = this.searchFilter.buildMatchSets(
+      files,
+      this.activeFilters
     );
   }
 
@@ -2528,6 +2506,13 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 					f.extension === "pdf"
 			)
 			.filter((f: TFile) => !this.plugin.isFileExcluded(f));
+
+		// Precompute filter match sets before filtering
+		if (this.activeFilters.length > 0) {
+			this.prepareFilterMatchSets(files);
+		} else {
+			this.filterMatchSets = null;
+		}
 
 		// "Save current query" chip (shown when a query is typed and not yet saved)
 		const extra: CmdkResult[] = [];
@@ -2561,21 +2546,41 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 			return;
 		}
 
-		// Phase 1: file name/path fuzzy (sync, instant)
-		const fuzzy = prepareFuzzySearch(query);
+		// Parse the live query into filter clauses. Any query that contains an
+		// explicit operator (tag:/path:/folder:/file:/prop:/[key::value]) is
+		// matched by SearchFilter; plain text keeps the original fuzzy behavior.
+		// This lets users type e.g. "tag:#📬/笔记 path:滴答清单" directly as a
+		// filter instead of only as a filename fuzzy string.
+		const liveClauses = parseFilter(trimmed);
+		this.liveQuery = trimmed;
+		this.liveHasFilter = liveClauses.some((c) => c.kind !== "text");
+		const textTokens = liveClauses
+			.map((c) => (c.kind === "text" ? c.value.trim() : ""))
+			.filter((v) => v !== "");
+		const fuzzyText = textTokens.join(" ");
+		const fuzzy = fuzzyText ? prepareFuzzySearch(fuzzyText) : null;
+
 		const fileResults: CmdkResult[] = [];
 
 		for (const file of files) {
-			const nameMatch = fuzzy(file.basename);
-			const pathMatch = fuzzy(file.path);
-			if (nameMatch || pathMatch) {
-				fileResults.push({
-					file,
-					nameMatch,
-					pathMatch,
-					type: "file",
-				});
-			}
+			// Active chips (presets) always apply
+			if (!this.matchesFilters(file)) continue;
+			// Live filter clauses (tag/path/folder/name/property) apply when present
+			if (
+				this.liveHasFilter &&
+				!this.searchFilter.matches(file, this.liveQuery)
+			)
+				continue;
+			const nameMatch = fuzzy ? fuzzy(file.basename) : null;
+			const pathMatch = fuzzy ? fuzzy(file.path) : null;
+			// Text requirement only applies when there is plain text to match
+			if (fuzzy && !nameMatch && !pathMatch) continue;
+			fileResults.push({
+				file,
+				nameMatch,
+				pathMatch,
+				type: "file",
+			});
 		}
 
 		fileResults.sort((a, b) => {
@@ -2587,7 +2592,9 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 				b.nameMatch?.score ?? -Infinity,
 				(b.pathMatch?.score ?? -Infinity) * 0.5
 			);
-			return sb - sa;
+			return (
+				sb - sa || a.file.basename.localeCompare(b.file.basename)
+			);
 		});
 
 		// Check if there is an exact name match (for quick-create gating)
@@ -2620,10 +2627,17 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 
 		// Phase 2: heading search — progressive, batched via setTimeout
 		if (trimmed.length >= 2) {
-			this.progressiveHeadingSearch(files, fuzzy, chooser, signal);
+			if (fuzzy)
+				this.progressiveHeadingSearch(files, fuzzy, chooser, signal);
 
 			// Phase 3: content search — progressive, async (reads file content)
-			this.progressiveContentSearch(files, query, chooser, signal);
+			if (fuzzyText)
+				this.progressiveContentSearch(
+					files,
+					fuzzyText,
+					chooser,
+					signal
+				);
 		}
 	}
 
@@ -2651,7 +2665,12 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 
 				for (const h of cache.headings) {
 					const headingMatch = fuzzy(h.heading);
-					if (headingMatch && this.matchesFilters(file)) {
+					if (
+						headingMatch &&
+						this.matchesFilters(file) &&
+						(!this.liveHasFilter ||
+							this.searchFilter.matches(file, this.liveQuery))
+					) {
 						chooser.addSuggestion({
 							file,
 							nameMatch: null,
@@ -2678,14 +2697,15 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 
 	private progressiveContentSearch(
 		files: TFile[],
-		query: string,
+		fuzzyText: string,
 		chooser: any,
 		signal: AbortSignal
 	) {
 		const BATCH_SIZE = 50;
 		const MAX_CONTENT_RESULTS = 20;
 		const DURATION_LIMIT = 5; // ms before yielding
-		const simpleSearch = prepareSimpleSearch(query);
+		if (!fuzzyText) return;
+		const simpleSearch = prepareSimpleSearch(fuzzyText);
 		let idx = 0;
 		let added = 0;
 

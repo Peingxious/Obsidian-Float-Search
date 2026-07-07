@@ -134,7 +134,55 @@ You can use search view in modal now.
 - 点击芯片即在该 CMDK 界面内**就地筛选**结果，不再跳转到原生搜索；再次点击取消激活。可多选（AND 逻辑）。
 - 在 CMDK 输入任意查询后，会出现「保存当前搜索为预设」项，保存后该条件即成为一枚芯片。
 - 命令面板中仍会为每个预设生成一条命令（`预设搜索：{名称}`），运行后直接打开 CMDK 并以该预设作为激活筛选。
-- 支持的查询语法：`tag:xxx` / `#xxx`、`path:xxx`、`file:xxx` / `name:xxx`，或纯文本（模糊路径匹配）。
+- 预设的查询**直接复用 Obsidian 原生搜索引擎**求值，因此支持**任意 Obsidian 搜索语法**（多标签组合、`-` 排除、`property:`、`line:`、`content:`、全文、路径等），与你在本体搜索里写的内容完全一致。
+
+---
+
+## New in 4.7.0
+
+### Fixed tag filtering for chips (presets)
+- Chip (preset) filters that target tags now resolve directly against Obsidian's **cached metadata** (`metadataCache`), so they match the native search exactly — including:
+  - **Tags with emoji / special characters in the name** (e.g. a preset stored as `📬/笔记` correctly matches the real tag `#📬/笔记`, where the emoji is part of the tag).
+  - **Nested tags** — a filter `#项目` also matches `#项目/子` and deeper levels.
+- Previously tag chips fell back to fuzzy filename matching, so anything beyond a plain `tag:#x` would silently return zero results. Tag queries are now precomputed once into a match set and applied as an exact set membership test, which is also faster for multi-chip (AND) filtering.
+- Non-tag queries (`path:`, `file:`, `name:`, plain text) still use the original lightweight `fileMatchesFilter` path.
+
+### Unified `SearchFilter` module
+All chip / preset matching now lives in a single `SearchFilter` class (`src/searchFilter.ts`). A filter string is split into space-separated **clauses**, each addressing one dimension, AND-ed together. Supported clause types:
+- `tag:项目` / `#项目` — tag (nested-aware, emoji-safe).
+- `path:Notes` — path prefix.
+- `folder:Notes` — containing folder only.
+- `file:foo` / `name:foo` — filename.
+- `status::进行中` / `[status::进行中]` / `prop:status:进行中` — frontmatter / inline property (value optional → key existence).
+- plain text — fuzzy on path, also tried as a tag (presets may omit `#`).
+
+The float search input parses these operators **live** — typing e.g. `tag:#📬/笔记 path:滴答清单` filters files directly, it is no longer treated as a raw filename fuzzy string. (Saved chips / presets use the same engine.)
+
+Multiple chips (active filters) are AND-ed across filters, so a composite like *tag + folder + property* is already expressible today. The next step is to surface a **collection block** UI that gathers the matched files' contents for further work.
+
+---
+
+## 4.7.0 新功能
+
+### 修复芯片（预设）的标签筛选
+- 以标签为目标的芯片筛选现在直接基于 Obsidian 的**缓存元数据**（`metadataCache`）求值，与原生搜索完全一致，支持：
+  - **标签名含 emoji / 特殊字符**（例如预设存为 `📬/笔记` 也能正确命中真实标签 `#📬/笔记`，其中 emoji 是标签名的一部分）。
+  - **嵌套标签** —— 筛选 `#项目` 会同时命中 `#项目/子` 及更深层。
+- 此前标签芯片会退化为模糊文件名匹配，任何非纯 `tag:#x` 的写法都会静默返回 0 结果。现在标签查询会一次性预计算成命中集合，并以精确的集合成员判断应用，多芯片（AND）筛选也更高效。
+- 非标签查询（`path:`、`file:`、`name:`、纯文本）仍走原有的轻量 `fileMatchesFilter` 逻辑。
+
+### 统一的 `SearchFilter` 模块
+所有芯片 / 预设的匹配逻辑现已统一收进 `src/searchFilter.ts` 的 `SearchFilter` 类。一条筛选串会被切成空格分隔的**子句（clause）**，每个子句只对应一个维度，多个子句之间为 AND。支持的子句类型：
+- `tag:项目` / `#项目` —— 标签（支持嵌套、emoji 安全）。
+- `path:Notes` —— 路径前缀。
+- `folder:Notes` —— 仅匹配所在文件夹。
+- `file:foo` / `name:foo` —— 文件名。
+- `status::进行中` / `[status::进行中]` / `prop:status:进行中` —— frontmatter / 行内属性（可只写 key 判存在）。
+- 纯文本 —— 路径模糊匹配，同时尝试当标签（预设可省略 `#`）。
+
+浮窗**输入框**也会实时解析这些算子——直接输入例如 `tag:#📬/笔记 path:滴答清单` 即可按筛选过滤文件，不再被当作一整串文件名模糊串。保存的芯片 / 预设用的是同一套引擎。
+
+多个芯片（active filters）之间是跨筛选的 AND，因此「标签 + 文件夹 + 属性」这类**综合筛选**今天即可表达。下一步是提供一个**区块（collection block）** UI，把命中的文件内容收集起来供后续处理。
 
 ---
 
