@@ -229,3 +229,109 @@ body:not(.show-file-path) .search-result-file-title .search-result-file-path {
 	align-items: center;
 	color: var(--text-accent);
 }
+
+/* ── Pills (exclusions) ── */
+.float-search-pill-list {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-1);
+	padding: var(--size-4-1) 0 var(--size-4-3);
+}
+
+.float-search-pill {
+	display: inline-flex;
+	align-items: center;
+	cursor: pointer;
+	padding: 2px var(--size-4-2);
+	background-color: var(--background-secondary-alt);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	font-size: var(--font-ui-smaller);
+	color: var(--text-normal);
+	user-select: none;
+	transition: background-color 0.1s ease;
+}
+
+.float-search-pill:hover {
+	background-color: var(--background-modifier-error);
+	color: var(--text-on-accent);
+	text-decoration: line-through;
+}
+
+/* ── Saved searches list ── */
+.float-search-saved-list {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-1);
+	padding: var(--size-4-2) 0 var(--size-4-4);
+}
+
+.float-search-saved-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--size-4-2);
+	padding: var(--size-4-1) var(--size-4-2);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+}
+
+.float-search-saved-label {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+}
+
+.float-search-saved-name {
+	font-weight: var(--font-semibold);
+}
+
+.float-search-saved-query {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.float-search-saved-delete {
+	white-space: nowrap;
+}
+
+.float-search-saved-empty {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-style: italic;
+}
+
+/* ── Filter chip bar (CMDK) ── */
+.float-search-filter-bar {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-1);
+	padding: var(--size-4-2) var(--size-4-2) var(--size-4-1);
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.float-search-filter-chip {
+	cursor: pointer;
+	padding: 2px var(--size-4-2);
+	background-color: var(--background-secondary-alt);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	font-size: var(--font-ui-smaller);
+	color: var(--text-normal);
+	user-select: none;
+	transition: all 0.1s ease;
+	white-space: nowrap;
+}
+
+.float-search-filter-chip:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.float-search-filter-chip.is-active {
+	background-color: var(--interactive-accent);
+	color: var(--text-on-accent);
+	border-color: var(--interactive-accent);
+}

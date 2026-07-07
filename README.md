@@ -67,6 +67,77 @@ You can use search view in modal now.
 
 ---
 
+## New in 4.4.0
+
+### Faster CMDK search
+- The quick-search palette (CMDK) is now debounced (~150ms) and caches file content by path + modification time, so unchanged files are not re-read. This makes repeated and partial typing much more responsive.
+- The main float search no longer runs a duplicate search on open — it applies the query once and only adjusts the caret.
+
+### Exclusions (folders / files)
+- New **Exclusions** section in the plugin settings with two pill inputs:
+  - **Exclude folders**: folders that are skipped in CMDK and the main search.
+  - **Exclude files**: specific files to skip.
+- Instead of typing the path by hand, a **vault-backed picker** filters real folders/files as you type (powered by Obsidian's own vault API) — pick one and it becomes a pill. Click a pill to remove it.
+- Excluded items are filtered from CMDK results and injected as `-path:"folder/"` / `-path:"file"` into the main search query (automatically stripped before saving, so your stored query stays clean).
+
+### Saved searches (presets)
+- New **Saved searches** section in the settings: store a `name + query` pair using any Obsidian search syntax (`tag:#项目`, `[status:: 进行中]`, `path:Notes`, etc.).
+- Each saved search is exposed three ways:
+  1. **CMDK launcher** — open the palette with an empty query to see your presets at the top; pick one to run it immediately.
+  2. **Generated command** — a `Saved search: <name>` command is auto-registered for every preset (usable from the command palette and hotkeys).
+  3. **Save current** — in CMDK, with a non-empty query, choose *"Save current search as preset"*, give it a name, and it is stored on the fly.
+
+---
+
+## 4.4.0 新功能
+
+### 更快的 CMDK 搜索
+- 极速搜索框（CMDK）现已加入约 150ms 防抖，并按「路径 + 修改时间」缓存文件正文，未改动的文件不再重复读取，连续输入与部分输入更跟手。
+- 主浮窗打开时不再重复执行一次搜索——只应用一次查询并调整光标位置。
+
+### 排除（文件夹 / 文件）
+- 插件设置新增「Exclusions」区，含两组胶囊输入：
+  - **排除文件夹**：在 CMDK 与主搜索中跳过的文件夹。
+  - **排除文件**：需跳过的指定文件。
+- 不再手动输入路径，而是用**仓库原生选择器**：输入时实时筛选真实的文件夹/文件（基于 Obsidian 官方 vault 接口），选中即生成胶囊，点一下删除。
+- 被排除项会从 CMDK 结果中滤除，并作为 `-path:"文件夹/"` / `-path:"文件"` 注入主搜索查询（保存前自动剥离，不污染你存储的查询）。
+
+### 预设搜索（Saved searches）
+- 设置页新增「Saved searches」区：用任意 Obsidian 搜索语法（`tag:#项目`、`[status:: 进行中]`、`path:Notes` 等）存储「名称 + 查询」。
+- 每条预设有三种使用入口：
+  1. **CMDK 启动器**——空查询打开极速框时，预设列在顶部，点选即立即执行。
+  2. **自动命令**——每条预设会自动注册一条 `Saved search: <名称>` 命令（可用于命令面板与快捷键）。
+  3. **随手保存**——在 CMDK 中输入非空查询后，选择「Save current search as preset」，起个名字即可当场存为预设。
+
+---
+
+## New in 4.5.0
+
+### Localization (i18n)
+- All plugin UI (settings, prompts, CMDK labels, generated command names) now follows **Obsidian's own language setting**. There is no separate language option — switch Obsidian's language and the plugin follows automatically.
+- Currently ships English and 简体中文.
+
+---
+
+## 4.5.0 新功能
+
+### 多语言（i18n）
+- 插件所有界面（设置、弹窗、CMDK 标签、自动生成的命令名称）现已**跟随 Obsidian 自身的语言设置**，不再单独提供语言开关——切换 Obsidian 语言，插件自动切换。
+- 当前内置英文与简体中文。
+
+---
+
+## 4.6.0 新功能
+
+### 预设搜索 = 筛选芯片（合并）
+- 「预设搜索」与「筛选按钮」已合并为**同一功能**：在设置页「预设搜索」中保存一个名称 + 查询条件（如 `Plugin` → `tag:#Plugin`，`Obsidian` → `path:2-输出/5-软件相关/Obsidian`），它就会作为一枚**芯片**出现在 CMDK 结果列表上方。
+- 点击芯片即在该 CMDK 界面内**就地筛选**结果，不再跳转到原生搜索；再次点击取消激活。可多选（AND 逻辑）。
+- 在 CMDK 输入任意查询后，会出现「保存当前搜索为预设」项，保存后该条件即成为一枚芯片。
+- 命令面板中仍会为每个预设生成一条命令（`预设搜索：{名称}`），运行后直接打开 CMDK 并以该预设作为激活筛选。
+- 支持的查询语法：`tag:xxx` / `#xxx`、`path:xxx`、`file:xxx` / `name:xxx`，或纯文本（模糊路径匹配）。
+
+---
+
 ## Support
 
 If you are enjoying this plugin then please support my work and enthusiasm by buying me a coffee

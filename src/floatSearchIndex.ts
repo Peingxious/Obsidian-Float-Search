@@ -10,6 +10,7 @@ import {
 	ObsidianProtocolData,
 	OpenViewState,
 	PaneType,
+	AbstractInputSuggest,
 	Plugin,
 	prepareFuzzySearch,
 	prepareSimpleSearch,
@@ -23,6 +24,7 @@ import {
 	Setting,
 	SuggestModal,
 	TAbstractFile,
+	TFolder,
 	TFile,
 	ViewStateResult,
 	Workspace,
@@ -33,6 +35,7 @@ import {
 import { EmbeddedView, isEmebeddedLeaf, spawnLeafView } from "./leafView";
 import { around } from "monkey-around";
 import { debounce } from "obsidian";
+import { t } from "./i18n";
 
 type sortOrder =
 	| "alphabetical"
@@ -61,6 +64,11 @@ interface searchState extends Record<string, unknown> {
 
 type CmdkTriggerKey = "Shift" | "Control" | "Alt" | "Meta" | "none";
 
+interface SavedSearch {
+	name: string;
+	query: string;
+}
+
 interface FloatSearchSettings {
 	searchViewState: searchState;
 	showFilePath: boolean;
@@ -71,6 +79,9 @@ interface FloatSearchSettings {
 	cmdkQuickCreate: boolean;
 	cmdkQuickCreateFolder: string;
 	cmdkQuickCreateTitleFormat: string;
+	excludeFolders: string[];
+	excludeFiles: string[];
+	savedSearches: SavedSearch[];
 }
 
 const DEFAULT_SETTINGS: FloatSearchSettings = {
@@ -90,7 +101,14 @@ const DEFAULT_SETTINGS: FloatSearchSettings = {
 	cmdkQuickCreate: false,
 	cmdkQuickCreateFolder: "",
 	cmdkQuickCreateTitleFormat: "YYYYMMDDHHmmss",
+	excludeFolders: [],
+	excludeFiles: [],
+	savedSearches: [],
 };
+
+// Single plugin instance, used to apply exclusion rules inside module-scope helpers
+// (e.g. initSearchViewWithLeaf) that don't otherwise have access to the plugin.
+let activePlugin: FloatSearchPlugin | null = null;
 
 const allViews: viewType[] = [
 	{
@@ -131,6 +149,11 @@ const initSearchViewWithLeaf = async (
 		state: {
 			...DEFAULT_SETTINGS.searchViewState,
 			...state,
+			query: activePlugin
+				? activePlugin.withExclusion(
+						(state?.query as string) ?? ""
+				  )
+				: (state?.query as string) ?? "",
 			triggerBySelf: true,
 		},
 	});
@@ -177,6 +200,7 @@ export default class FloatSearchPlugin extends Plugin {
 
 	async onload() {
 		await this.loadSettings();
+		activePlugin = this;
 
 		this.app.workspace.onLayoutReady(() => {
 			this.initState();
@@ -255,11 +279,11 @@ export default class FloatSearchPlugin extends Plugin {
 		});
 	}
 
-	openCmdkModal() {
+	openCmdkModal(initialFilters?: string[]) {
 		if (this.cmdkModal) {
 			this.cmdkModal.close();
 		}
-		this.cmdkModal = new FloatSearchCmdkModal(this);
+		this.cmdkModal = new FloatSearchCmdkModal(this, initialFilters);
 		this.cmdkModal.open();
 	}
 
@@ -272,6 +296,106 @@ export default class FloatSearchPlugin extends Plugin {
 		this.settings.showFilePath = !this.settings.showFilePath;
 		this.updateFilePathVisibility();
 		this.applySettingsUpdate();
+	}
+
+	// ── Exclusion helpers ──────────────────────────────────────────────
+	private normalizePath(p: string): string {
+		return p.trim().replace(/^\/+/, "").replace(/\/+$/, "");
+	}
+
+	buildExcludeClause(): string {
+		const parts: string[] = [];
+		for (const raw of this.settings.excludeFolders) {
+			const p = this.normalizePath(raw);
+			if (p) parts.push(`-path:"${p}/"`);
+		}
+		for (const raw of this.settings.excludeFiles) {
+			const p = this.normalizePath(raw);
+			if (p) parts.push(`-path:"${p}"`);
+		}
+		return parts.join(" ");
+	}
+
+	withExclusion(query: string): string {
+		const clause = this.buildExcludeClause();
+		const q = (query ?? "").trim();
+		if (!clause) return q;
+		if (q.includes(clause)) return q;
+		return q ? `${q} ${clause}` : clause;
+	}
+
+	stripExclusion(query: string): string {
+		const clause = this.buildExcludeClause();
+		let q = query ?? "";
+		if (clause) q = q.split(clause).join("");
+		return q.replace(/\s+/g, " ").trim();
+	}
+
+	isFileExcluded(file: TFile): boolean {
+		const folders = this.settings.excludeFolders
+			.map((f) => this.normalizePath(f))
+			.filter(Boolean);
+		const files = this.settings.excludeFiles
+			.map((f) => this.normalizePath(f))
+			.filter(Boolean);
+		const path = file.path;
+		if (
+			files.some((f) => f === path || f === file.name)
+		)
+			return true;
+		if (
+			folders.some((f) => path === f || path.startsWith(f + "/"))
+		)
+			return true;
+		return false;
+	}
+
+	// ── Saved searches ────────────────────────────────────────────────
+	private slug(name: string): string {
+		return (
+			name
+				.trim()
+				.toLowerCase()
+				.replace(/[^a-z0-9]+/g, "-")
+				.replace(/^-+|-+$/g, "") || "x"
+		);
+	}
+
+	private registeredSavedIds = new Set<string>();
+
+	registerSavedSearchCommands() {
+		for (const s of this.settings.savedSearches) {
+			const id = "savedsearch-" + this.slug(s.name);
+			if (this.registeredSavedIds.has(id)) continue;
+			this.registeredSavedIds.add(id);
+			this.addCommand({
+				id,
+				name: t("savedSearchCmd", { name: s.name }),
+				callback: () => this.openCmdkModal([s.query]),
+			});
+		}
+	}
+
+	addSavedSearch(name: string, query: string) {
+		this.settings.savedSearches.push({ name, query });
+		this.saveSettings();
+		this.registerSavedSearchCommands();
+	}
+
+	// Open the main Float Search (modal or configured view) with a query.
+	// Exclusion rules are applied automatically by the target search view.
+	openSearchWithQuery(query: string) {
+		const viewType = this.settings.defaultViewType;
+		const state = { ...this.state, query, current: true };
+		if (viewType === "modal") {
+			this.initModal(state, true, false);
+		} else {
+			initSearchViewWithLeaf(
+				this.app,
+				viewType as PaneType | "sidebar",
+				state
+			);
+		}
 	}
 
 	initState() {
@@ -746,7 +870,8 @@ export default class FloatSearchPlugin extends Plugin {
 						return function (value: string) {
 							old.call(this, value);
 							if (self.app.workspace.layoutReady) {
-								self.settings.searchViewState.query = value;
+								self.settings.searchViewState.query =
+									self.stripExclusion(value);
 								self.applySettingsUpdate();
 							}
 						};
@@ -1117,6 +1242,8 @@ export default class FloatSearchPlugin extends Plugin {
 				},
 			});
 		}
+
+		this.registerSavedSearchCommands();
 	}
 
 	registerSearchOperatorCommands() {
@@ -1315,11 +1442,35 @@ export default class FloatSearchPlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign(
-			{},
-			DEFAULT_SETTINGS,
-			await this.loadData()
-		);
+		type LegacySettings = Partial<FloatSearchSettings> & {
+			filterButtons?: { name: string; query: string }[];
+		};
+		const data = (await this.loadData()) as LegacySettings;
+		const merged: FloatSearchSettings & {
+			filterButtons?: { name: string; query: string }[];
+		} = Object.assign({}, DEFAULT_SETTINGS, data);
+
+		// Merge the legacy "filter buttons" feature into saved searches so the
+		// single preset list drives the CMDK filter chips.
+		if (Array.isArray(data.filterButtons)) {
+			for (const fb of data.filterButtons) {
+				if (
+					fb?.name &&
+					fb?.query &&
+					!merged.savedSearches.some(
+						(s) => s.query.trim() === fb.query.trim()
+					)
+				) {
+					merged.savedSearches.push({
+						name: fb.name,
+						query: fb.query,
+					});
+				}
+			}
+			delete merged.filterButtons;
+		}
+
+		this.settings = merged;
 	}
 
 	async saveSettings() {
@@ -1335,6 +1486,131 @@ const TRIGGER_KEY_OPTIONS: Record<CmdkTriggerKey, string> = {
 	none: "Disabled",
 };
 
+class NamePromptModal extends Modal {
+	private defaultValue: string;
+	private result: (value: string | null) => void;
+
+	constructor(
+		app: App,
+		defaultValue: string,
+		result: (value: string | null) => void
+	) {
+		super(app);
+		this.defaultValue = defaultValue;
+		this.result = result;
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.empty();
+		contentEl.addClass("float-search-prompt");
+		contentEl.createEl("h3", { text: t("saveAsPreset") });
+		const input = contentEl.createEl("input", {
+			type: "text",
+			placeholder: t("presetName"),
+		});
+		input.value = this.defaultValue;
+		const row = contentEl.createDiv({ cls: "float-search-prompt-row" });
+		const ok = row.createEl("button", { text: t("save") });
+		const cancel = row.createEl("button", { text: t("cancel") });
+
+		const submit = () => {
+			const v = input.value.trim();
+			this.result(v || this.defaultValue);
+			this.close();
+		};
+		ok.onClickEvent(() => submit());
+		cancel.onClickEvent(() => {
+			this.result(null);
+			this.close();
+		});
+		input.addEventListener("keydown", (e) => {
+			if (e.key === "Enter") submit();
+			if (e.key === "Escape") {
+				this.result(null);
+				this.close();
+			}
+		});
+		setTimeout(() => input.focus(), 0);
+	}
+
+	onClose() {
+		this.contentEl.empty();
+	}
+}
+
+function buildPillList(
+	container: HTMLElement,
+	items: string[],
+	onRemove: (index: number) => void
+) {
+	const wrap = container.createDiv({ cls: "float-search-pill-list" });
+	wrap.empty();
+	items.forEach((item, i) => {
+		const pill = wrap.createDiv({ cls: "float-search-pill" });
+		pill.setText(item);
+		pill.title = t("clickToRemove");
+		pill.onClickEvent(() => onRemove(i));
+	});
+	return wrap;
+}
+
+function promptForName(
+	app: App,
+	defaultValue: string
+): Promise<string | null> {
+	return new Promise((resolve) => {
+		new NamePromptModal(app, defaultValue, resolve).open();
+	});
+}
+
+/**
+ * Folder / file picker backed by the official vault API. As the user types,
+ * it shows a fuzzy-filtered list of real vault folders or files, so the
+ * exact path never has to be typed by hand.
+ */
+class PathSuggest extends AbstractInputSuggest<TFolder | TFile> {
+	constructor(
+		app: App,
+		private inputEl: HTMLInputElement,
+		private kind: "folder" | "file",
+		private onPick: (path: string) => void
+	) {
+		super(app, inputEl);
+	}
+
+	getSuggestions(query: string): (TFolder | TFile)[] {
+		const pool = this.app.vault
+			.getAllLoadedFiles()
+			.filter((f) =>
+				this.kind === "folder"
+					? f instanceof TFolder && f.path !== ""
+					: f instanceof TFile
+			) as (TFolder | TFile)[];
+		if (!query) return pool.slice(0, 50);
+		const fuzzy = prepareFuzzySearch(query);
+		return pool
+			.map((f) => ({ f, m: fuzzy(f.path) }))
+			.filter((x) => x.m)
+			.sort(
+				(a, b) =>
+					(b.m!.score ?? -Infinity) - (a.m!.score ?? -Infinity)
+			)
+			.slice(0, 50)
+			.map((x) => x.f);
+	}
+
+	renderSuggestion(value: TFolder | TFile, el: HTMLElement) {
+		el.setText(value.path || "/");
+	}
+
+	selectSuggestion(value: TFolder | TFile) {
+		this.onPick(value.path);
+		this.inputEl.value = "";
+		this.close();
+	}
+}
+
 class FloatSearchSettingTab extends PluginSettingTab {
 	plugin: FloatSearchPlugin;
 
@@ -1347,13 +1623,11 @@ class FloatSearchSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 
-		containerEl.createEl("h2", { text: "Float Search Settings" });
+		containerEl.createEl("h2", { text: t("settingsTitle") });
 
 		new Setting(containerEl)
-			.setName("Quick search trigger")
-			.setDesc(
-				"Double-tap this key to open the quick search modal (CMDK)."
-			)
+			.setName(t("quickSearchTrigger"))
+			.setDesc(t("quickSearchTriggerDesc"))
 			.addDropdown((dropdown) => {
 				for (const [value, label] of Object.entries(
 					TRIGGER_KEY_OPTIONS
@@ -1369,10 +1643,8 @@ class FloatSearchSettingTab extends PluginSettingTab {
 			});
 
 		new Setting(containerEl)
-			.setName("Double-tap interval (ms)")
-			.setDesc(
-				"Maximum time between two key presses to trigger quick search. Default: 300ms."
-			)
+			.setName(t("doubleTapInterval"))
+			.setDesc(t("doubleTapIntervalDesc"))
 			.addSlider((slider) => {
 				slider
 					.setLimits(150, 600, 50)
@@ -1385,13 +1657,11 @@ class FloatSearchSettingTab extends PluginSettingTab {
 					});
 			});
 
-		containerEl.createEl("h3", { text: "Quick Create" });
+		containerEl.createEl("h3", { text: t("quickCreate") });
 
 		new Setting(containerEl)
-			.setName("Enable quick create")
-			.setDesc(
-				"When no exact match is found in quick search, show an option to create a new note with the search text as content."
-			)
+			.setName(t("enableQuickCreate"))
+			.setDesc(t("enableQuickCreateDesc"))
 			.addToggle((toggle) => {
 				toggle
 					.setValue(this.plugin.settings.cmdkQuickCreate)
@@ -1402,12 +1672,10 @@ class FloatSearchSettingTab extends PluginSettingTab {
 			});
 
 		new Setting(containerEl)
-			.setName("Quick create folder")
-			.setDesc(
-				"Folder to create new notes in. Leave empty for vault root."
-			)
+			.setName(t("quickCreateFolder"))
+			.setDesc(t("quickCreateFolderDesc"))
 			.addText((text) => {
-				text.setPlaceholder("e.g. Inbox")
+				text.setPlaceholder(t("phInbox"))
 					.setValue(this.plugin.settings.cmdkQuickCreateFolder)
 					.onChange(async (value) => {
 						this.plugin.settings.cmdkQuickCreateFolder =
@@ -1417,12 +1685,10 @@ class FloatSearchSettingTab extends PluginSettingTab {
 			});
 
 		new Setting(containerEl)
-			.setName("Title format")
-			.setDesc(
-				"Timestamp format for the note title. Tokens: YYYY, MM, DD, HH, mm, ss."
-			)
+			.setName(t("titleFormat"))
+			.setDesc(t("titleFormatDesc"))
 			.addText((text) => {
-				text.setPlaceholder("YYYYMMDDHHmmss")
+				text.setPlaceholder(t("phTimestamp"))
 					.setValue(
 						this.plugin.settings.cmdkQuickCreateTitleFormat
 					)
@@ -1432,6 +1698,141 @@ class FloatSearchSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					});
 			});
+
+		// ── Exclusions ──────────────────────────────────────────────
+		containerEl.createEl("h3", { text: t("exclusions") });
+
+		// Exclude folders
+		new Setting(containerEl)
+			.setName(t("excludeFolders"))
+			.setDesc(t("excludeFoldersDesc"))
+			.addText((text) => {
+				text.setPlaceholder(t("phTemplates"));
+				new PathSuggest(
+					this.app,
+					text.inputEl,
+					"folder",
+					async (path) => {
+						if (
+							!this.plugin.settings.excludeFolders.includes(
+								path
+							)
+						) {
+							this.plugin.settings.excludeFolders.push(path);
+							await this.plugin.saveSettings();
+							this.display();
+						}
+					}
+				);
+			});
+		buildPillList(
+			containerEl,
+			this.plugin.settings.excludeFolders,
+			async (i) => {
+				this.plugin.settings.excludeFolders.splice(i, 1);
+				await this.plugin.saveSettings();
+				this.display();
+			}
+		);
+
+		// Exclude files
+		new Setting(containerEl)
+			.setName(t("excludeFiles"))
+			.setDesc(t("excludeFilesDesc"))
+			.addText((text) => {
+				text.setPlaceholder(t("phSecrets"));
+				new PathSuggest(
+					this.app,
+					text.inputEl,
+					"file",
+					async (path) => {
+						if (
+							!this.plugin.settings.excludeFiles.includes(
+								path
+							)
+						) {
+							this.plugin.settings.excludeFiles.push(path);
+							await this.plugin.saveSettings();
+							this.display();
+						}
+					}
+				);
+			});
+		buildPillList(
+			containerEl,
+			this.plugin.settings.excludeFiles,
+			async (i) => {
+				this.plugin.settings.excludeFiles.splice(i, 1);
+				await this.plugin.saveSettings();
+				this.display();
+			}
+		);
+
+		// ── Saved searches ─────────────────────────────────────────
+		containerEl.createEl("h3", { text: t("savedSearches") });
+
+		const addSetting = new Setting(containerEl).setName(
+			t("addSavedSearch")
+		);
+		addSetting.setDesc(t("addSavedSearchDesc"));
+		let nameInput: any;
+		let queryInput: any;
+		addSetting.addText((text) => {
+			nameInput = text;
+			text.setPlaceholder(t("namePlaceholder"));
+		});
+		addSetting.addText((text) => {
+			queryInput = text;
+			text.setPlaceholder(t("queryPlaceholder"));
+		});
+		addSetting.addButton((button) => {
+			button
+				.setButtonText(t("add"))
+				.setCta()
+				.onClick(async () => {
+					const name = nameInput?.inputEl.value.trim();
+					const query = queryInput?.inputEl.value.trim();
+					if (name && query) {
+						this.plugin.addSavedSearch(name, query);
+						this.display();
+					}
+				});
+		});
+
+		// Saved search list
+		const listEl = containerEl.createDiv({
+			cls: "float-search-saved-list",
+		});
+		this.plugin.settings.savedSearches.forEach((s, i) => {
+			const row = listEl.createDiv({
+				cls: "float-search-saved-row",
+			});
+			const label = row.createDiv({
+				cls: "float-search-saved-label",
+			});
+			label.createSpan({ cls: "float-search-saved-name" }).setText(
+				s.name
+			);
+			label.createSpan({
+				cls: "float-search-saved-query",
+			}).setText(s.query);
+			const del = row.createEl("button", {
+				text: t("delete"),
+				cls: "float-search-saved-delete",
+			});
+			del.onClickEvent(async () => {
+				this.plugin.settings.savedSearches.splice(i, 1);
+				await this.plugin.saveSettings();
+				this.display();
+			});
+		});
+		if (this.plugin.settings.savedSearches.length === 0) {
+			listEl.createDiv({
+				cls: "float-search-saved-empty",
+				text: t("noSavedSearches"),
+			});
+		}
+
 	}
 }
 
@@ -1512,7 +1913,9 @@ class FloatSearchModal extends Modal {
 	onClose() {
 		const { contentEl } = this;
 
-		this.cb(this.searchLeaf.view.getState());
+		const st = this.searchLeaf.view.getState();
+		st.query = this.plugin.stripExclusion(st.query as string);
+		this.cb(st);
 
 		this.searchLeaf.detach();
 		this.fileLeaf?.detach();
@@ -1596,14 +1999,16 @@ class FloatSearchModal extends Modal {
 		this.searchLeaf.setPinned(true);
 		await this.searchLeaf.setViewState({
 			type: "search",
-			state: { ...this.state, triggerBySelf: true },
+			state: {
+				...this.state,
+				query: this.plugin.withExclusion(this.state.query ?? ""),
+				triggerBySelf: true,
+			},
 		});
 
-		setTimeout(async () => {
-			await this.searchLeaf.view.setState(
-				{ ...this.state, triggerBySelf: true },
-				{ history: false }
-			);
+		// Only adjust the caret; the query was already applied via setViewState
+		// so re-applying setState here would trigger a second redundant search.
+		setTimeout(() => {
 			const searchComponent = (this.searchLeaf.view as SearchView)
 				.searchComponent;
 			if (searchComponent?.inputEl) {
@@ -1954,8 +2359,53 @@ interface CmdkResult {
 	content?: string;
 	contentMatch?: SearchResult | null;
 	line?: number;
-	type: "file" | "heading" | "content" | "create";
+	type: "file" | "heading" | "content" | "create" | "saved" | "save";
 	createQuery?: string;
+	savedQuery?: string;
+}
+
+function fileMatchesFilter(
+	app: App,
+	file: TFile,
+	filter: string
+): boolean {
+	const trimmed = filter.trim();
+	if (!trimmed) return true;
+
+	// tag:xxx or #xxx
+	const tagMatch =
+		trimmed.match(/^tag:(.+)$/) || trimmed.match(/^#(.+)$/);
+	if (tagMatch) {
+		const tag = tagMatch[1].trim();
+		const cache = app.metadataCache.getFileCache(file);
+		if (cache?.tags) {
+			return cache.tags.some(
+				(t) => t.tag === tag || t.tag === "#" + tag
+			);
+		}
+		return false;
+	}
+
+	// path:xxx
+	const pathMatch = trimmed.match(/^path:(.+)$/);
+	if (pathMatch) {
+		const path = pathMatch[1].trim().toLowerCase();
+		return file.path.toLowerCase().includes(path);
+	}
+
+	// file:xxx or name:xxx
+	const nameMatch = trimmed.match(/^(?:file|name):(.+)$/);
+	if (nameMatch) {
+		const name = nameMatch[1].trim().toLowerCase();
+		return (
+			file.name.toLowerCase().includes(name) ||
+			file.basename.toLowerCase() === name
+		);
+	}
+
+	// Default: fuzzy match on path
+	const fuzzy = prepareFuzzySearch(trimmed);
+	return fuzzy(file.path) != null;
 }
 
 class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
@@ -1965,11 +2415,16 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 	private fileLeaf: WorkspaceLeaf | undefined;
 	private fileEmbeddedView: EmbeddedView | undefined;
 	private searchAbort: AbortController | null = null;
+	private contentCache = new Map<string, { mtime: number; text: string }>();
+	private debouncedUpdate = debounce(() => this.runSearch(), 150);
+	private activeFilters: string[] = [];
+	private filterBarEl: HTMLElement;
 
-	constructor(plugin: FloatSearchPlugin) {
+	constructor(plugin: FloatSearchPlugin, initialFilters?: string[]) {
 		super(plugin.app);
 		this.plugin = plugin;
 		this.limit = 50;
+		this.activeFilters = initialFilters ? [...initialFilters] : [];
 		this.setPlaceholder("Search files and content...");
 		this.setInstructions([
 			{ command: "↑↓", purpose: "Navigate" },
@@ -1983,12 +2438,26 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 
 	onOpen() {
 		super.onOpen();
+		this.contentCache.clear();
 		this.bodyEl = createDiv("float-search-cmdk-body");
 		this.modalEl.insertBefore(
 			this.bodyEl,
 			(this as any).resultContainerEl
 		);
 		this.bodyEl.appendChild((this as any).resultContainerEl);
+
+		// Render filter chip bar as its own horizontal row, above the results body
+		this.filterBarEl = this.modalEl.createDiv({
+			cls: "float-search-filter-bar",
+		});
+		this.modalEl.insertBefore(this.filterBarEl, this.bodyEl);
+		this.renderFilterBar();
+
+		// If the modal was opened with presets pre-selected (e.g. via the
+		// saved-search command), filter the list immediately.
+		if (this.activeFilters.length > 0) {
+			this.runSearch();
+		}
 	}
 
 	// Required by SuggestModal but unused — we drive the chooser directly
@@ -1996,27 +2465,91 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 		return [];
 	}
 
-	// Override to use progressive rendering via chooser.addSuggestion
-	updateSuggestions() {
-		// Cancel previous in-flight search
-		this.searchAbort?.abort();
-		const abort = (this.searchAbort = new AbortController());
-		const { signal } = abort;
+  // Override to use progressive rendering via chooser.addSuggestion
+  updateSuggestions() {
+    this.debouncedUpdate();
+  }
 
-		const chooser = (this as any).chooser;
-		const query = this.inputEl.value;
+  // ── Filter bar ─────────────────────────────────────────────────────
+  private renderFilterBar() {
+    this.filterBarEl.empty();
+    const buttons = this.plugin.settings.savedSearches;
+    if (buttons.length === 0) {
+      this.filterBarEl.style.display = "none";
+      return;
+    }
+    this.filterBarEl.style.display = "";
 
-		const files = this.app.vault.getFiles().filter(
-			(f: TFile) =>
-				f.extension === "md" ||
-				f.extension === "canvas" ||
-				f.extension === "pdf"
-		);
+    for (const fb of buttons) {
+      const chip = this.filterBarEl.createDiv({
+        cls: "float-search-filter-chip",
+        text: fb.name,
+      });
+      if (this.activeFilters.includes(fb.query)) {
+        chip.addClass("is-active");
+      }
+      chip.onClickEvent(() => {
+        const idx = this.activeFilters.indexOf(fb.query);
+        if (idx >= 0) {
+          this.activeFilters.splice(idx, 1);
+        } else {
+          this.activeFilters.push(fb.query);
+        }
+        this.renderFilterBar();
+        this.runSearch();
+      });
+    }
+  }
 
-		// Empty query — show recent files
-		if (!query.trim()) {
+  private matchesFilters(file: TFile): boolean {
+    if (this.activeFilters.length === 0) return true;
+    return this.activeFilters.every((f) =>
+      fileMatchesFilter(this.app, file, f)
+    );
+  }
+
+  private runSearch() {
+    // Cancel previous in-flight search
+    this.searchAbort?.abort();
+    const abort = (this.searchAbort = new AbortController());
+    const { signal } = abort;
+
+    const chooser = (this as any).chooser;
+    const query = this.inputEl.value;
+    const trimmed = query.trim();
+
+		// Apply exclusion rules to the scanned file set
+		const files = this.app.vault
+			.getFiles()
+			.filter(
+				(f: TFile) =>
+					f.extension === "md" ||
+					f.extension === "canvas" ||
+					f.extension === "pdf"
+			)
+			.filter((f: TFile) => !this.plugin.isFileExcluded(f));
+
+		// "Save current query" chip (shown when a query is typed and not yet saved)
+		const extra: CmdkResult[] = [];
+		if (
+			trimmed &&
+			!this.plugin.settings.savedSearches.some(
+				(s) => s.query.trim() === trimmed
+			)
+		) {
+			extra.push({
+				file: null as any,
+				nameMatch: null,
+				pathMatch: null,
+				type: "save",
+			});
+		}
+
+		// Empty query — show launcher (saved) + recent files, filtered by active chips
+		if (!trimmed) {
 			const recent = files
 				.sort((a: TFile, b: TFile) => b.stat.mtime - a.stat.mtime)
+				.filter((f: TFile) => this.matchesFilters(f))
 				.slice(0, this.limit)
 				.map((file: TFile) => ({
 					file,
@@ -2024,7 +2557,7 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 					pathMatch: null,
 					type: "file" as const,
 				}));
-			chooser.setSuggestions(recent);
+			chooser.setSuggestions([...extra, ...recent]);
 			return;
 		}
 
@@ -2058,47 +2591,39 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 		});
 
 		// Check if there is an exact name match (for quick-create gating)
-		const queryLower = query.trim().toLowerCase();
+		const queryLower = trimmed.toLowerCase();
 		const hasExactMatch = fileResults.some(
 			(r) => r.file.basename.toLowerCase() === queryLower
 		);
 
-		const resultsToShow = fileResults.slice(0, this.limit);
+		const resultsToShow = fileResults
+			.filter((r) => this.matchesFilters(r.file))
+			.slice(0, this.limit);
 
 		// Append "quick create" option when enabled and no exact match
 		if (
 			this.plugin.settings.cmdkQuickCreate &&
 			!hasExactMatch &&
-			query.trim().length > 0
+			trimmed.length > 0
 		) {
 			resultsToShow.push({
 				file: null as any,
 				nameMatch: null,
 				pathMatch: null,
 				type: "create",
-				createQuery: query.trim(),
+				createQuery: trimmed,
 			});
 		}
 
 		// Render file results immediately
-		chooser.setSuggestions(resultsToShow);
+		chooser.setSuggestions([...extra, ...resultsToShow]);
 
 		// Phase 2: heading search — progressive, batched via setTimeout
-		if (query.trim().length >= 2) {
-			this.progressiveHeadingSearch(
-				files,
-				fuzzy,
-				chooser,
-				signal
-			);
+		if (trimmed.length >= 2) {
+			this.progressiveHeadingSearch(files, fuzzy, chooser, signal);
 
 			// Phase 3: content search — progressive, async (reads file content)
-			this.progressiveContentSearch(
-				files,
-				query,
-				chooser,
-				signal
-			);
+			this.progressiveContentSearch(files, query, chooser, signal);
 		}
 	}
 
@@ -2126,7 +2651,7 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 
 				for (const h of cache.headings) {
 					const headingMatch = fuzzy(h.heading);
-					if (headingMatch) {
+					if (headingMatch && this.matchesFilters(file)) {
 						chooser.addSuggestion({
 							file,
 							nameMatch: null,
@@ -2135,11 +2660,11 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 							headingMatch,
 							type: "heading",
 						});
-						added++;
-						if (added >= MAX_HEADING_RESULTS) return;
+							added++;
+							if (added >= MAX_HEADING_RESULTS) return;
+						}
 					}
 				}
-			}
 
 			// More files to process — yield to event loop
 			if (idx < files.length && added < MAX_HEADING_RESULTS) {
@@ -2179,18 +2704,27 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 					}
 				}
 
-				const file = files[idx];
-				if (file.extension !== "md") continue;
+			const file = files[idx];
+			if (file.extension !== "md") continue;
 
-				let text: string;
-				try {
+			let text: string;
+			const cached = this.contentCache.get(file.path);
+			try {
+				if (cached && cached.mtime === file.stat.mtime) {
+					text = cached.text;
+				} else {
 					text = await this.app.vault.cachedRead(file);
-				} catch {
-					continue;
+					this.contentCache.set(file.path, {
+						mtime: file.stat.mtime,
+						text,
+					});
 				}
+			} catch {
+				continue;
+			}
 
 				const result = simpleSearch(text);
-				if (!result) continue;
+				if (!result || !this.matchesFilters(file)) continue;
 
 				// Compute line number and context from first match offset
 				const matchStart = result.matches[0][0];
@@ -2247,6 +2781,21 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 			return;
 		}
 
+
+
+		if (result.type === "save") {
+			const contentEl = el.createDiv("suggestion-content");
+			const titleEl = contentEl.createDiv("suggestion-title");
+			titleEl.setText(t("saveCurrentTitle"));
+			const noteEl = contentEl.createDiv("suggestion-note");
+			noteEl.setText(this.inputEl.value.trim());
+			const auxEl = el.createDiv("suggestion-aux");
+			const flair = auxEl.createSpan("suggestion-flair");
+			setIcon(flair, "bookmark");
+			return;
+		}
+
+
 		const contentEl = el.createDiv("suggestion-content");
 
 		if (result.type === "content" && result.content) {
@@ -2295,12 +2844,24 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 		}
 	}
 
-	onChooseSuggestion(
+	async onChooseSuggestion(
 		result: CmdkResult,
 		evt: MouseEvent | KeyboardEvent
 	) {
 		if (result.type === "create") {
 			this.quickCreateNote(result.createQuery ?? "", evt);
+			return;
+		}
+
+
+
+		if (result.type === "save") {
+			const current = this.inputEl.value.trim();
+			const name = await promptForName(this.app, current);
+			if (name) {
+				this.plugin.addSavedSearch(name, current);
+			}
+			this.close();
 			return;
 		}
 
