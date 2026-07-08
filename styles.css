@@ -294,8 +294,31 @@ body:not(.show-file-path) .search-result-file-title .search-result-file-path {
 	white-space: nowrap;
 }
 
+.float-search-saved-actions {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+	margin-left: auto;
+}
+
+.float-search-saved-edit,
 .float-search-saved-delete {
 	white-space: nowrap;
+}
+
+.float-search-saved-row.is-editing {
+	flex-wrap: wrap;
+	gap: var(--size-4-2);
+}
+
+.float-search-saved-row.is-editing .float-search-saved-input {
+	flex: 1 1 12em;
+	min-width: 8em;
+}
+
+.float-search-saved-row.is-editing .float-search-saved-save,
+.float-search-saved-row.is-editing .float-search-saved-cancel {
+	margin-left: auto;
 }
 
 .float-search-saved-empty {

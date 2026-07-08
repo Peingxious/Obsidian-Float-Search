@@ -149,16 +149,20 @@ You can use search view in modal now.
 
 ### Unified `SearchFilter` module
 All chip / preset matching now lives in a single `SearchFilter` class (`src/searchFilter.ts`). A filter string is split into space-separated **clauses**, each addressing one dimension, AND-ed together. Supported clause types:
-- `tag:项目` / `#项目` — tag (nested-aware, emoji-safe).
+- `tag:项目` / `#项目` — tag (nested-aware, emoji-safe; also matches tags stored in ANY frontmatter property, not just inline `#tag`).
 - `path:Notes` — path prefix.
 - `folder:Notes` — containing folder only.
 - `file:foo` / `name:foo` — filename.
 - `status::进行中` / `[status::进行中]` / `prop:status:进行中` — frontmatter / inline property (value optional → key existence).
+- `line:文字` / `block:块ID` / `section:标题` / `content:正文` / `task:待办` — **content operators** (read the file body; matched in the async content phase).
 - plain text — fuzzy on path, also tried as a tag (presets may omit `#`).
+- `-` prefix negates any clause (`-tag:done`, `-path:Drafts`, `-"some phrase"`).
+- `"quoted phrases"` — exact multi-word text.
+- `OR` — OR between groups (space = AND within a group).
 
-The float search input parses these operators **live** — typing e.g. `tag:#📬/笔记 path:滴答清单` filters files directly, it is no longer treated as a raw filename fuzzy string. (Saved chips / presets use the same engine.)
+This is the **full Obsidian Query Language**: e.g. `tag:#📬/笔记 path:滴答清单 -tag:归档 OR content:会议纪要`. The float search input parses it **live** — no longer treated as a raw filename fuzzy string. (Saved chips / presets use the same engine.)
 
-Multiple chips (active filters) are AND-ed across filters, so a composite like *tag + folder + property* is already expressible today. The next step is to surface a **collection block** UI that gathers the matched files' contents for further work.
+Chips are single-select (mutually exclusive): selecting one deactivates any other active chip, and clicking the active chip again clears it. (The planned *collection block* UI that would combine multiple filters at once is still future work.)
 
 ---
 
@@ -173,16 +177,40 @@ Multiple chips (active filters) are AND-ed across filters, so a composite like *
 
 ### 统一的 `SearchFilter` 模块
 所有芯片 / 预设的匹配逻辑现已统一收进 `src/searchFilter.ts` 的 `SearchFilter` 类。一条筛选串会被切成空格分隔的**子句（clause）**，每个子句只对应一个维度，多个子句之间为 AND。支持的子句类型：
-- `tag:项目` / `#项目` —— 标签（支持嵌套、emoji 安全）。
+- `tag:项目` / `#项目` —— 标签（支持嵌套、emoji 安全；也匹配存在**任意 frontmatter 属性**里的标签，不限于行内 `#tag`）。
 - `path:Notes` —— 路径前缀。
 - `folder:Notes` —— 仅匹配所在文件夹。
 - `file:foo` / `name:foo` —— 文件名。
 - `status::进行中` / `[status::进行中]` / `prop:status:进行中` —— frontmatter / 行内属性（可只写 key 判存在）。
+- `line:文字` / `block:块ID` / `section:标题` / `content:正文` / `task:待办` —— **内容类算子**（读取正文，在异步内容阶段匹配）。
 - 纯文本 —— 路径模糊匹配，同时尝试当标签（预设可省略 `#`）。
+- `-` 前缀 —— 取反任意子句（`-tag:done`、`-path:Drafts`、`-"某短语"`）。
+- `"引号短语"` —— 多词精确文本。
+- `OR` —— 组间「或」（组内空格为「与」）。
 
-浮窗**输入框**也会实时解析这些算子——直接输入例如 `tag:#📬/笔记 path:滴答清单` 即可按筛选过滤文件，不再被当作一整串文件名模糊串。保存的芯片 / 预设用的是同一套引擎。
+这等同于 **Obsidian 完整 Query 语法**：例如 `tag:#📬/笔记 path:滴答清单 -tag:归档 OR content:会议纪要`。浮窗**输入框**会实时解析——不再被当作一整串文件名模糊串。保存的芯片 / 预设用的是同一套引擎。
 
-多个芯片（active filters）之间是跨筛选的 AND，因此「标签 + 文件夹 + 属性」这类**综合筛选**今天即可表达。下一步是提供一个**区块（collection block）** UI，把命中的文件内容收集起来供后续处理。
+芯片为**单选互斥**：选中一枚会取消其它已激活的芯片，再次点击已激活的芯片则取消。 （计划中的、可同时组合多个筛选的**区块（collection block）** UI 仍是后续工作。）
+
+---
+
+## New in 4.8.0
+
+### Saved searches: inline edit & polish
+- **Inline editing** — each saved search row now has an **Edit** button that turns the row into `name` / `query` inputs inline; **Save** commits, **Cancel** discards. No more delete-and-re-create to fix a typo.
+- **Mutually exclusive chips** — in the float search / CMDK filter bar the chips are now single-select: picking one deactivates the others, and clicking the active chip clears it. (See the 4.7.0 note above.)
+- **Right-aligned actions** — the Edit / Delete buttons on each saved-search row now sit on the right edge instead of being centered.
+- **No scroll jump on save** — adding / editing / deleting a saved search now re-renders only the list, so the settings page no longer scrolls back to the top.
+
+---
+
+## 4.8.0 新功能
+
+### 预设搜索：内联编辑与细节打磨
+- **内联编辑** —— 每条预设后方新增「编辑」按钮，点击后该行就地变为「名称 / 查询」输入框，「保存」提交、「取消」放弃，不必再删了重建来改错别字。
+- **芯片互斥单选** —— 浮窗 / CMDK 筛选栏里的芯片改为单选：选一枚会取消其它已选项，点击已激活的芯片则取消（见上方 4.7.0 说明）。
+- **操作按钮靠右** —— 预设列表每行的「编辑 / 删除」按钮现统一靠右对齐，不再居中。
+- **保存不再回滚** —— 新增 / 编辑 / 删除预设现在只局部重渲染列表，设置页不会跳回顶部。
 
 ---
 

@@ -101,6 +101,7 @@ const dict: Record<string, { en: string; zh: string }> = {
 		zh: "查询（如：tag:#项目）",
 	},
 	add: { en: "Add", zh: "添加" },
+	edit: { en: "Edit", zh: "编辑" },
 	delete: { en: "Delete", zh: "删除" },
 	noSavedSearches: {
 		en: "No saved searches yet.",
