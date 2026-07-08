@@ -210,14 +210,14 @@ export default class FloatSearchPlugin extends Plugin {
 		this.app.workspace.onLayoutReady(() => {
 			this.initState();
 			this.registerIcons();
-
-			this.patchWorkspace();
-			this.patchWorkspaceLeaf();
-			this.patchSearchView();
-			this.patchVchildren();
-			this.patchDragManager();
+			// The prototype monkeypatches (patchWorkspace / patchSearchView / …)
+			// are deferred to first use via ensurePatched() — they are only
+			// needed once the user actually opens a float search, so we no
+			// longer pay for them at every startup (candidate ⑤).
 			this.registerDoubleKeyHandler();
 		});
+
+		this.registerContentCacheInvalidation();
 
 		this.registerObsidianURIHandler();
 		this.registerObsidianCommands();
@@ -228,6 +228,7 @@ export default class FloatSearchPlugin extends Plugin {
 			"search",
 			`Search obsidian in ${this.settings.defaultViewType} view`,
 			() => {
+				this.ensurePatched();
 				if (this.settings.defaultViewType === "modal") {
 					this.initModal(this.state, true, true);
 				} else {
@@ -249,6 +250,47 @@ export default class FloatSearchPlugin extends Plugin {
 	onunload() {
 		// this.state = DEFAULT_SETTINGS.searchViewState;
 		this.modal?.close();
+	}
+
+	// Candidate ④: warm, plugin-scoped content cache shared across every CMDK
+	// open (no longer cleared on each open). Invalidated per-path on vault
+	// changes; capped with a simple LRU to bound memory.
+	public contentCache = new Map<string, { mtime: number; text: string }>();
+	private readonly CONTENT_CACHE_MAX = 2000;
+
+	cacheFileContent(path: string, mtime: number, text: string) {
+		if (this.contentCache.size >= this.CONTENT_CACHE_MAX) {
+			const oldest = this.contentCache.keys().next().value;
+			if (oldest !== undefined) this.contentCache.delete(oldest);
+		}
+		this.contentCache.set(path, { mtime, text });
+	}
+
+	private registerContentCacheInvalidation() {
+		this.registerEvent(
+			this.app.vault.on("modify", (f) => this.contentCache.delete(f.path))
+		);
+		this.registerEvent(
+			this.app.vault.on("rename", (_f, oldPath) =>
+				this.contentCache.delete(oldPath)
+			)
+		);
+		this.registerEvent(
+			this.app.vault.on("delete", (f) => this.contentCache.delete(f.path))
+		);
+	}
+
+	// Candidate ⑤: run the prototype monkeypatches exactly once, on first use,
+	// instead of unconditionally at every startup.
+	private patched = false;
+	private ensurePatched() {
+		if (this.patched) return;
+		this.patched = true;
+		this.patchWorkspace();
+		this.patchWorkspaceLeaf();
+		this.patchSearchView();
+		this.patchVchildren();
+		this.patchDragManager();
 	}
 
 	registerDoubleKeyHandler() {
@@ -285,6 +327,7 @@ export default class FloatSearchPlugin extends Plugin {
 	}
 
 	openCmdkModal(initialFilters?: string[]) {
+		this.ensurePatched();
 		if (this.cmdkModal) {
 			this.cmdkModal.close();
 		}
@@ -390,6 +433,7 @@ export default class FloatSearchPlugin extends Plugin {
 	// Open the main Float Search (modal or configured view) with a query.
 	// Exclusion rules are applied automatically by the target search view.
 	openSearchWithQuery(query: string) {
+		this.ensurePatched();
 		const viewType = this.settings.defaultViewType;
 		const nativeQuery = new SearchFilter(this.app).toNativeQuery(query);
 		const state = { ...this.state, query: nativeQuery, current: true };
@@ -417,6 +461,7 @@ export default class FloatSearchPlugin extends Plugin {
 		stateSave: boolean = false,
 		clearQuery: boolean = false
 	) {
+		this.ensurePatched();
 		if (this.modal) {
 			this.modal.close();
 		}
@@ -2450,7 +2495,6 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 	private fileLeaf: WorkspaceLeaf | undefined;
 	private fileEmbeddedView: EmbeddedView | undefined;
 	private searchAbort: AbortController | null = null;
-	private contentCache = new Map<string, { mtime: number; text: string }>();
 	private debouncedUpdate = debounce(() => this.runSearch(), 150);
 	private activeFilters: string[] = [];
 	private filterMatchSets: Map<string, Set<string>> | null = null;
@@ -2458,6 +2502,13 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 	private liveQuery: Query = { groups: [] };
 	private liveHasContent = false;
 	private filterBarEl: HTMLElement;
+	// Candidate ③: the scanned + exclusion-filtered candidate file set, built
+	// once and reused across keystrokes (invalidated on vault changes).
+	private candidateFiles: TFile[] | null = null;
+	private vaultHandlers: Array<[string, () => void]> = [];
+	// Candidate ⑥: file paths that already passed the metadata pre-filter in
+	// runSearch, so the heading phase need not re-evaluate them.
+	private passedMeta: Set<string> | null = null;
 
 	constructor(plugin: FloatSearchPlugin, initialFilters?: string[]) {
 		super(plugin.app);
@@ -2478,7 +2529,16 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 
 	onOpen() {
 		super.onOpen();
-		this.contentCache.clear();
+		// Candidate ③: invalidate the cached candidate file set whenever the
+		// vault changes, so the next search rebuilds it lazily.
+		const invalidate = () => {
+			this.candidateFiles = null;
+		};
+		for (const ev of ["create", "modify", "rename", "delete"] as const) {
+			const h = invalidate;
+			(this.app.vault as any).on(ev, h);
+			this.vaultHandlers.push([ev, h]);
+		}
 		this.bodyEl = createDiv("float-search-cmdk-body");
 		this.modalEl.insertBefore(
 			this.bodyEl,
@@ -2549,6 +2609,28 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
     );
   }
 
+  // Candidate ③: build the scanned + exclusion-filtered candidate file set
+  // once, normalising the exclusion lists a single time (not per file), and
+  // reuse it across keystrokes. Rebuilt lazily after any vault change.
+  private getCandidateFiles(): TFile[] {
+    if (this.candidateFiles) return this.candidateFiles;
+    const folders = this.plugin.settings.excludeFolders
+      .map((f) => this.plugin.normalizePath(f))
+      .filter(Boolean);
+    const fileExcludes = this.plugin.settings.excludeFiles
+      .map((f) => this.plugin.normalizePath(f))
+      .filter(Boolean);
+    const exts = new Set(["md", "canvas", "pdf"]);
+    this.candidateFiles = this.app.vault.getFiles().filter((f: TFile) => {
+      if (!exts.has(f.extension)) return false;
+      const p = f.path;
+      if (fileExcludes.some((x) => x === p || x === f.name)) return false;
+      if (folders.some((x) => p === x || p.startsWith(x + "/"))) return false;
+      return true;
+    });
+    return this.candidateFiles;
+  }
+
   // Precompute, for each active filter query, the set of file paths that
   // match. Delegates to SearchFilter, the single source of truth for all
   // filter matching (tag / path / folder / property / text, with AND across
@@ -2560,26 +2642,20 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
     );
   }
 
-  private runSearch() {
-    // Cancel previous in-flight search
-    this.searchAbort?.abort();
-    const abort = (this.searchAbort = new AbortController());
-    const { signal } = abort;
+	private runSearch() {
+		// Cancel previous in-flight search
+		this.searchAbort?.abort();
+		const abort = (this.searchAbort = new AbortController());
+		const { signal } = abort;
+		this.passedMeta = null;
 
     const chooser = (this as any).chooser;
     const rawInput = this.inputEl.value;
     const trimmed = rawInput.trim();
 
-		// Apply exclusion rules to the scanned file set
-		const files = this.app.vault
-			.getFiles()
-			.filter(
-				(f: TFile) =>
-					f.extension === "md" ||
-					f.extension === "canvas" ||
-					f.extension === "pdf"
-			)
-			.filter((f: TFile) => !this.plugin.isFileExcluded(f));
+		// Candidate ③: reuse the cached, exclusion-filtered candidate set
+		// instead of re-scanning + re-normalising exclusions on every keystroke.
+		const files = this.getCandidateFiles();
 
 		// Precompute filter match sets before filtering
 		if (this.activeFilters.length > 0) {
@@ -2644,11 +2720,16 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 		// When the query needs file bodies (content operators), the file list
 		// is produced by the async content phase to avoid false positives.
 		if (!this.liveHasContent) {
+			// Candidate ⑥: remember which files passed the metadata pre-filter
+			// so the (later, batched) heading phase can reuse it instead of
+			// re-evaluating matchMetadata per file.
+			this.passedMeta = new Set<string>();
 			for (const file of files) {
 				// Active chips (presets) always apply
 				if (!this.matchesFilters(file)) continue;
 				// Live metadata clauses (tag/path/folder/name/property) apply
 				if (!this.searchFilter.matchMetadata(file, query)) continue;
+				this.passedMeta.add(file.path);
 				const nameMatch = fuzzy ? fuzzy(file.basename) : null;
 				const pathMatch = fuzzy ? fuzzy(file.path) : null;
 				// Text requirement only applies when there is plain text
@@ -2744,7 +2825,10 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 					if (
 						headingMatch &&
 						this.matchesFilters(file) &&
-						this.searchFilter.matchMetadata(file, this.liveQuery)
+						// Candidate ⑥: reuse the precomputed pass-set instead of
+						// re-running matchMetadata on every heading check.
+						(this.passedMeta?.has(file.path) ??
+							this.searchFilter.matchMetadata(file, this.liveQuery))
 					) {
 						chooser.addSuggestion({
 							file,
@@ -2823,16 +2907,20 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 				if (!contentMode && !this.matchesFilters(file)) continue;
 
 				let text: string;
-				const cached = this.contentCache.get(file.path);
+				// Candidate ④: read through the plugin-scoped, warm content
+				// cache — shared across every CMDK open, so repeated opens
+				// (and other searchers) almost never re-read file bodies.
+				const cached = this.plugin.contentCache.get(file.path);
 				try {
 					if (cached && cached.mtime === file.stat.mtime) {
 						text = cached.text;
 					} else {
 						text = await this.app.vault.cachedRead(file);
-						this.contentCache.set(file.path, {
-							mtime: file.stat.mtime,
-							text,
-						});
+						this.plugin.cacheFileContent(
+							file.path,
+							file.stat.mtime,
+							text
+						);
 					}
 				} catch {
 					continue;
@@ -3178,6 +3266,11 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 	}
 
 	onClose() {
+		super.onClose?.();
+		for (const [ev, h] of this.vaultHandlers) {
+			this.app.vault.off(ev as any, h as any);
+		}
+		this.vaultHandlers = [];
 		this.fileLeaf?.detach();
 		this.fileEmbeddedView?.unload();
 	}

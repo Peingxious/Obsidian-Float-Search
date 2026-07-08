@@ -1,4 +1,4 @@
-import { App, TFile, prepareFuzzySearch } from "obsidian";
+import { App, TFile, prepareFuzzySearch, CachedMetadata } from "obsidian";
 
 /**
  * SearchFilter — the single source of truth for matching files against
@@ -183,62 +183,97 @@ function parseClause(token: string): Clause | null {
 export class SearchFilter {
 	constructor(private app: App) {}
 
+	// Candidate ①: parse each filter string ONCE. The hot path
+	// (buildMatchSets, matches) used to re-run parseQuery on every
+	// (file, filter) pair — N×F redundant parses on large vaults.
+	private queryCache = new Map<string, Query>();
+
+	private getQuery(raw: string): Query {
+		let q = this.queryCache.get(raw);
+		if (!q) {
+			q = parseQuery(raw);
+			this.queryCache.set(raw, q);
+		}
+		return q;
+	}
+
 	/** Does the file satisfy the parsed query (content optional)? */
-	matches(file: TFile, filter: string, content?: string): boolean {
-		const query = parseQuery(filter);
+	matches(
+		file: TFile,
+		filter: string,
+		content?: string,
+		cache?: CachedMetadata | null
+	): boolean {
+		const query = this.getQuery(filter);
 		if (query.groups.length === 0) return true;
-		if (content !== undefined) return this.matchContent(file, content, query);
+		if (content !== undefined)
+			return this.matchContent(file, content, query, cache);
 		// No content available: positive content clauses cannot be satisfied.
 		return query.groups.some((group) =>
 			group.every((c) => {
 				if (isContentKind(c)) return c.negated; // unmet positive → false
-				return this.matchMetaClause(file, c);
+				return this.matchMetaClause(file, c, cache);
 			})
 		);
 	}
 
 	/** True iff file satisfies all METADATA clauses (no file read needed). */
-	matchMetadata(file: TFile, query: Query): boolean {
+	matchMetadata(
+		file: TFile,
+		query: Query,
+		cache?: CachedMetadata | null
+	): boolean {
 		if (query.groups.length === 0) return true;
 		return query.groups.some((group) =>
-			group.every((c) => this.matchMetaClause(file, c))
+			group.every((c) => this.matchMetaClause(file, c, cache))
 		);
 	}
 
 	/** True iff file satisfies ALL clauses given its body content. */
-	matchContent(file: TFile, content: string, query: Query): boolean {
+	matchContent(
+		file: TFile,
+		content: string,
+		query: Query,
+		cache?: CachedMetadata | null
+	): boolean {
 		if (query.groups.length === 0) return true;
 		return query.groups.some((group) =>
-			group.every((c) => this.matchFullClause(file, content, c))
+			group.every((c) => this.matchFullClause(file, content, c, cache))
 		);
 	}
 
-	private matchMetaClause(file: TFile, c: Clause): boolean {
+	private matchMetaClause(
+		file: TFile,
+		c: Clause,
+		cache?: CachedMetadata | null
+	): boolean {
 		// Content clauses are evaluated by the async content phase, and free
 		// text clauses by the caller's fuzzy match — both are neutral here so
 		// they never pre-filter-out files that need a body read / fuzzy pass.
 		if (isContentKind(c) || c.kind === "text") return true;
-		const inner = this.matchClauseInner(file, null, c);
+		const inner = this.matchClauseInner(file, null, c, cache);
 		return c.negated ? !inner : inner;
 	}
 
 	private matchFullClause(
 		file: TFile,
 		content: string,
-		c: Clause
+		c: Clause,
+		cache?: CachedMetadata | null
 	): boolean {
-		const inner = this.matchClauseInner(file, content, c);
+		const inner = this.matchClauseInner(file, content, c, cache);
 		return c.negated ? !inner : inner;
 	}
 
 	private matchClauseInner(
 		file: TFile,
 		content: string | null,
-		c: Clause
+		c: Clause,
+		cache?: CachedMetadata | null
 	): boolean {
 		switch (c.kind) {
 			case "tag":
-				return this.fileHasTag(file, c.tag);
+				return this.fileHasTag(file, c.tag, cache);
 			case "path":
 				return file.path
 					.toLowerCase()
@@ -255,7 +290,7 @@ export class SearchFilter {
 					file.basename.toLowerCase() === c.value.toLowerCase()
 				);
 			case "property":
-				return this.matchProperty(file, c.key, c.value);
+				return this.matchProperty(file, c.key, c.value, cache);
 			case "text": {
 				// Free text: match path (fuzzy-ish substring) and, when we
 				// have the body, the content too.
@@ -272,14 +307,14 @@ export class SearchFilter {
 				const asTag = c.value.startsWith("#")
 					? c.value
 					: "#" + c.value;
-				return this.fileHasTag(file, asTag);
+				return this.fileHasTag(file, asTag, cache);
 			}
 			case "line":
 				return this.bodyHasLine(content, c.value);
 			case "block":
 				return this.bodyHasBlock(content, c.value);
 			case "section":
-				return this.fileHasSection(file, c.value);
+				return this.fileHasSection(file, c.value, cache);
 			case "content":
 				return (
 					content?.toLowerCase().includes(c.value.toLowerCase()) ??
@@ -304,8 +339,12 @@ export class SearchFilter {
 		return content.includes("^" + value);
 	}
 
-	private fileHasSection(file: TFile, value: string): boolean {
-		const cache = this.app.metadataCache.getFileCache(file);
+	private fileHasSection(
+		file: TFile,
+		value: string,
+		precomputed?: CachedMetadata | null
+	): boolean {
+		const cache = precomputed ?? this.app.metadataCache.getFileCache(file);
 		const v = value.toLowerCase();
 		return (
 			cache?.headings?.some((h) =>
@@ -326,8 +365,12 @@ export class SearchFilter {
 	}
 
 	/** Tag match with nested-tag support (e.g. #项目 also matches #项目/子). */
-	fileHasTag(file: TFile, normalizedTag: string): boolean {
-		const cache = this.app.metadataCache.getFileCache(file);
+	fileHasTag(
+		file: TFile,
+		normalizedTag: string,
+		precomputed?: CachedMetadata | null
+	): boolean {
+		const cache = precomputed ?? this.app.metadataCache.getFileCache(file);
 		if (!cache) return false;
 		// 1) Inline tags / the standard `tags` frontmatter property, both of
 		// which Obsidian indexes into `cache.tags`.
@@ -384,9 +427,10 @@ export class SearchFilter {
 	private matchProperty(
 		file: TFile,
 		key: string,
-		value?: string
+		value?: string,
+		precomputed?: CachedMetadata | null
 	): boolean {
-		const cache = this.app.metadataCache.getFileCache(file);
+		const cache = precomputed ?? this.app.metadataCache.getFileCache(file);
 		const fm = cache?.frontmatter;
 		if (!fm || !(key in fm)) return false;
 		if (value === undefined) return true;
@@ -403,11 +447,24 @@ export class SearchFilter {
 		files: TFile[],
 		filters: string[]
 	): Map<string, Set<string>> {
+		// Candidate ②: snapshot each file's cached metadata ONCE (not once
+		// per filter). This turns N×F getFileCache calls into N — the
+		// dominant cost of chip matching on large vaults — while keeping the
+		// exact same tag / nested / property semantics as the live matcher.
+		const cacheMap = new Map<TFile, CachedMetadata | null>();
+		for (const file of files) {
+			cacheMap.set(
+				file,
+				this.app.metadataCache.getFileCache(file) ?? null
+			);
+		}
 		const map = new Map<string, Set<string>>();
 		for (const f of filters) {
+			const query = this.getQuery(f);
 			const set = new Set<string>();
 			for (const file of files) {
-				if (this.matches(file, f)) set.add(file.path);
+				if (this.matchMetadata(file, query, cacheMap.get(file)))
+					set.add(file.path);
 			}
 			map.set(f, set);
 		}
@@ -420,7 +477,7 @@ export class SearchFilter {
 	 * CMDK modal. Native search understands every operator we support.
 	 */
 	toNativeQuery(filter: string): string {
-		const query = parseQuery(filter);
+		const query = this.getQuery(filter);
 		if (query.groups.length === 0) return filter;
 		return query.groups
 			.map((group) =>

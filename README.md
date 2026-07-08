@@ -202,6 +202,14 @@ Chips are single-select (mutually exclusive): selecting one deactivates any othe
 - **Right-aligned actions** — the Edit / Delete buttons on each saved-search row now sit on the right edge instead of being centered.
 - **No scroll jump on save** — adding / editing / deleting a saved search now re-renders only the list, so the settings page no longer scrolls back to the top.
 
+### Performance (load & read faster)
+- **Parse each filter once** — `SearchFilter` now memoises parsed queries, so chip / preset matching no longer re-parses the same query for every file (was N×F redundant parses on large vaults).
+- **Chip matching snapshots metadata once** — `buildMatchSets` now reads each file's cached metadata a single time (N lookups) instead of N×F, which was the dominant cost of chip filtering on big vaults.
+- **Warm, plugin-scoped content cache** — the file-body cache is no longer cleared on every CMDK open and is shared across all openings; it is invalidated per-path on vault changes and capped with a simple LRU. Repeated opens almost never re-read bodies.
+- **Cached candidate file set** — the scanned + exclusion-filtered file list is built once and reused across keystrokes (exclusion lists normalised a single time), rebuilt lazily on vault changes.
+- **No duplicate metadata test** — the heading search phase reuses the metadata pass-set computed in the main scan instead of re-evaluating `matchMetadata` per file.
+- **Lazy prototype patches** — the search-view monkeypatches are now installed on first use, not at every startup.
+
 ---
 
 ## 4.8.0 新功能
@@ -211,6 +219,14 @@ Chips are single-select (mutually exclusive): selecting one deactivates any othe
 - **芯片互斥单选** —— 浮窗 / CMDK 筛选栏里的芯片改为单选：选一枚会取消其它已选项，点击已激活的芯片则取消（见上方 4.7.0 说明）。
 - **操作按钮靠右** —— 预设列表每行的「编辑 / 删除」按钮现统一靠右对齐，不再居中。
 - **保存不再回滚** —— 新增 / 编辑 / 删除预设现在只局部重渲染列表，设置页不会跳回顶部。
+
+### 性能（加载更快 / 读取更快）
+- **筛选串只解析一次** —— `SearchFilter` 现在缓存解析结果，芯片 / 预设匹配不再对每个文件重复解析同一条查询（大库下原先是 N×F 次冗余解析）。
+- **芯片匹配只取一次元数据** —— `buildMatchSets` 现在每个文件只读取一次缓存元数据（N 次），而非 N×F 次，这是大库下芯片筛选的主要开销来源。
+- **温热且插件级的正文缓存** —— 正文缓存不再在每次打开 CMDK 时清空，而是跨多次打开共享；按路径在 vault 变更时失效，并用简单 LRU 限容。反复调起几乎不再重读正文。
+- **候选文件集缓存** —— 扫描 + 排除过滤后的文件集只构建一次并在按键间复用（排除项也只归一化一次），vault 变更时惰性重建。
+- **不再重复元数据判定** —— 标题搜索阶段复用主扫描已算出的"通过元数据"集合，不再对每个文件重跑 `matchMetadata`。
+- **原型补丁懒加载** —— 搜索视图的 monkeypatch 改为首次使用时安装，而非每次启动都装。
 
 ---
 
