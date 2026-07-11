@@ -34,6 +34,7 @@ type ConstructableWorkspaceSplit = new (ws: Workspace, dir: "horizontal" | "vert
 
 export function isEmebeddedLeaf(leaf: WorkspaceLeaf) {
 	// Work around missing enhance.js API by checking match condition instead of looking up parent
+	if (!leaf) return false;
 	return leaf.containerEl.matches(".fs-block.fs-leaf-view .workspace-leaf");
 }
 

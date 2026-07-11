@@ -291,6 +291,38 @@ export default class FloatSearchPlugin extends Plugin {
 		this.patchSearchView();
 		this.patchVchildren();
 		this.patchDragManager();
+		this.patchEditorHighlights();
+	}
+
+	// Obsidian's search addon calls removeHighlights()/hasHighlight() on every
+	// markdown editor whenever a search runs. Editors created inside the
+	// embedded (HoverPopover) preview leaf may not have the search-highlight
+	// StateField registered in their CodeMirror state, so `state.field(...)`
+	// throws "Field is not present in this state" and crashes the app. Wrap
+	// both methods defensively so the embedded preview can never crash Obsidian
+	// — when the field is absent there are simply no highlights to manage.
+	private patchEditorHighlights() {
+		const proto = Editor.prototype as any;
+		for (const name of ["removeHighlights", "hasHighlight"] as const) {
+			const orig = proto[name];
+			if (!orig || orig.__fsPatched) continue;
+			proto[name] = function (...args: any[]) {
+				try {
+					return orig.apply(this, args);
+				} catch (e) {
+					if (
+						e instanceof RangeError &&
+						/Field is not present in this state/.test(
+							e.message
+						)
+					) {
+						return name === "hasHighlight" ? false : undefined;
+					}
+					throw e;
+				}
+			};
+			proto[name].__fsPatched = true;
+		}
 	}
 
 	registerDoubleKeyHandler() {
@@ -490,7 +522,7 @@ export default class FloatSearchPlugin extends Plugin {
 			getLeaf: (next) =>
 				function (...args) {
 					const activeLeaf = (this as Workspace).activeLeaf;
-					if (activeLeaf) {
+					if (activeLeaf?.parent) {
 						// @ts-ignore
 						const fsCtnEl = (
 							activeLeaf.parent.containerEl as HTMLElement
@@ -644,6 +676,7 @@ export default class FloatSearchPlugin extends Plugin {
 
 						const view = old.call(this, file, openState);
 						setTimeout(() => {
+							if (!this.parent) return;
 							const fsCtnEl = (
 								this.parent.containerEl as HTMLElement
 							).parentElement;
