@@ -178,6 +178,13 @@ export default class FloatSearchPlugin extends Plugin {
 	allLoaded: boolean = false;
 	queryLoaded: boolean = false;
 
+	// Candidate ① guards: prevent the setState re-route from spawning a new
+	// Float Search on every external setState (which would loop forever and
+	// freeze Obsidian). `routingQuery` blocks re-entrancy; `lastRoutedQuery`
+	// deduplicates repeated setStates carrying the same query.
+	routingQuery: boolean = false;
+	lastRoutedQuery: string = "";
+
 	patchedDomChildren = false;
 
 	public applySettingsUpdate = debounce(async () => {
@@ -303,10 +310,11 @@ export default class FloatSearchPlugin extends Plugin {
 	// — when the field is absent there are simply no highlights to manage.
 	private patchEditorHighlights() {
 		const proto = Editor.prototype as any;
+		const uninstallers: Array<() => void> = [];
 		for (const name of ["removeHighlights", "hasHighlight"] as const) {
 			const orig = proto[name];
 			if (!orig || orig.__fsPatched) continue;
-			proto[name] = function (...args: any[]) {
+			const wrapped = function (...args: any[]) {
 				try {
 					return orig.apply(this, args);
 				} catch (e) {
@@ -321,7 +329,16 @@ export default class FloatSearchPlugin extends Plugin {
 					throw e;
 				}
 			};
-			proto[name].__fsPatched = true;
+			wrapped.__fsPatched = true;
+			proto[name] = wrapped;
+			// Restore the original method on plugin unload so we don't leave a
+			// permanent patch on Editor.prototype for every editor in the app.
+			uninstallers.push(() => {
+				proto[name] = orig;
+			});
+		}
+		if (uninstallers.length) {
+			this.register(() => uninstallers.forEach((u) => u()));
 		}
 	}
 
@@ -379,7 +396,9 @@ export default class FloatSearchPlugin extends Plugin {
 	}
 
 	// ── Exclusion helpers ──────────────────────────────────────────────
-	private normalizePath(p: string): string {
+	// Public so the CMDK modal (a separate class) can reuse the same
+	// normalisation when building its candidate-file set.
+	normalizePath(p: string): string {
 		return p.trim().replace(/^\/+/, "").replace(/\/+$/, "");
 	}
 
@@ -828,10 +847,16 @@ export default class FloatSearchPlugin extends Plugin {
 									y: viewSwitchButtonPos.y + 30,
 								});
 							});
-							targetEl.parentElement.insertBefore(
-								viewSwitchEl,
-								targetEl
-							);
+						// Remove any previously inserted switch button first so
+						// repeated rebuilds (rebuildView -> onOpen) don't stack
+						// multiple copies and bloat the search view DOM.
+						targetEl.parentElement
+							.querySelector(".float-search-view-switch")
+							?.remove();
+						targetEl.parentElement.insertBefore(
+							viewSwitchEl,
+							targetEl
+						);
 							if (!this.hidePathToggle) {
 								this.hidePathToggle = new Setting(
 									this.searchParamsContainerEl
@@ -960,52 +985,70 @@ export default class FloatSearchPlugin extends Plugin {
 							}
 						};
 					},
-					setState(old) {
-						return function (
-							state: any,
-							eState: Record<string, unknown>
+				setState(old) {
+					return function (
+						state: any,
+						eState: Record<string, unknown>
+					) {
+						if (
+							typeof state.query === "string" &&
+							!state?.triggerBySelf
 						) {
-							if (
-								typeof state.query === "string" &&
-								!state?.triggerBySelf
-							) {
-								if (self.queryLoaded) {
-									if (
-										self.settings.defaultViewType ===
-										"modal"
-									) {
-										self.initModal(
-											{
-												...state,
-												query: state.query,
-												current: false,
-												triggerBySelf: true,
-											},
-											true,
-											false
-										);
-									} else {
-										initSearchViewWithLeaf(
-											self.app,
-											self.settings.defaultViewType,
-											{
-												...state,
-												query: state.query,
-												current: false,
-												triggerBySelf: true,
-											}
-										);
+							if (self.queryLoaded) {
+								// Re-route an external query to a Float Search,
+								// but guard against re-entrant spawning (which
+								// would recurse) and against spawning again for
+								// the SAME query (which would otherwise loop
+								// endlessly and freeze Obsidian).
+								const changed =
+									state.query &&
+									state.query !== self.lastRoutedQuery;
+								if (changed && !self.routingQuery) {
+									self.routingQuery = true;
+									try {
+										if (
+											self.settings.defaultViewType ===
+											"modal"
+										) {
+											self.initModal(
+												{
+													...state,
+													query: state.query,
+													current: false,
+													triggerBySelf: true,
+												},
+												true,
+												false
+											);
+										} else {
+											initSearchViewWithLeaf(
+												self.app,
+												self.settings.defaultViewType,
+												{
+													...state,
+													query: state.query,
+													current: false,
+													triggerBySelf: true,
+												}
+											);
+										}
+										self.lastRoutedQuery = state.query;
+									} finally {
+										self.routingQuery = false;
 									}
-
-									return;
 								}
-
-								self.queryLoaded = true;
+								// The Float Search takes over; do NOT apply the
+								// query to the native view (matches original
+								// behaviour and avoids a second redundant search).
+								return;
 							}
 
-							old.call(this, state, eState);
-						};
-					},
+							self.queryLoaded = true;
+						}
+
+						old.call(this, state, eState);
+					};
+				},
 				})
 			);
 			searchView.leaf?.rebuildView();
@@ -2947,6 +2990,11 @@ class FloatSearchCmdkModal extends SuggestModal<CmdkResult> {
 				try {
 					if (cached && cached.mtime === file.stat.mtime) {
 						text = cached.text;
+						// Touch for true LRU: re-insert so the entry moves to
+						// the most-recent position and eviction drops the
+						// least-recently-used file instead of the oldest.
+						this.plugin.contentCache.delete(file.path);
+						this.plugin.contentCache.set(file.path, cached);
 					} else {
 						text = await this.app.vault.cachedRead(file);
 						this.plugin.cacheFileContent(
