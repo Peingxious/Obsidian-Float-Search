@@ -500,10 +500,15 @@ export default class FloatSearchPlugin extends Plugin {
 	}
 
 	initState() {
-		// Initialize state with all default properties
+		// Initialize state with all default properties.
+		// We intentionally do NOT inherit the persisted `query` from
+		// settings.searchViewState, so the float search always opens with a
+		// global (empty) scope. Folder/tag restrictions (path:/tag:) are only
+		// applied when the user types them or picks a saved search chip.
 		this.state = {
 			...DEFAULT_SETTINGS.searchViewState,
 			...this.settings.searchViewState,
+			query: "",
 		};
 	}
 
